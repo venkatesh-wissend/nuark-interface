@@ -19,5 +19,6 @@ from django.urls import path, include
 
 urlpatterns = [
     path("upload/", include("modules.file_uploads.api.urls")),
+    path("api/job/", include("modules.file_uploads.api.job_urls")),
     path("auth/", include("modules.auth.api.urls"))
 ]
