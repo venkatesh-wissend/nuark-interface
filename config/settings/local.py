@@ -22,3 +22,4 @@ DATABASES = {
 DATABASE_ROUTERS = ["config.dbrouters.WissendRouter"]
 
 DEBUG = True
+ALLOWED_HOSTS = ['*']
