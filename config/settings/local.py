@@ -1,9 +1,9 @@
 from .base import *
 
 DATABASES = {
-    "wissendDB": {
+    "nuarkDB": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": "wissendDB",
+        "NAME": "nuark_db", # Secondary DB 
         "USER": "postgres",
         "PASSWORD": "pass",
         "HOST": "localhost",
@@ -11,7 +11,7 @@ DATABASES = {
     },
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'nuark_DB',
+        'NAME': 'nuark_DB', # DB in local (Default DB)
         'USER': 'postgres',
         'PASSWORD': 'pass',
         'HOST': 'localhost',
