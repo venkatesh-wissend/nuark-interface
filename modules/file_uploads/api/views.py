@@ -265,17 +265,17 @@ class ClassifyUploadDataView(APIView):
             row.ai_data = ai
             row.save(update_fields=["ai_data"])
 
-            ClassificationTempData.objects.using("nuarkDB").create(
-                uuid=uuid.uuid4(),
-                ai_data=ai,
-                status="ai_completed",
-                non_editable_data={},
-                manual_data={},
-                ai_manual_data={},
-                created_on=timezone.now(),
-                updated_on=timezone.now(),
-                job_id=job_id
-            )
+            # ClassificationTempData.objects.using("nuarkDB").create(
+            #     uuid=uuid.uuid4(),
+            #     ai_data=ai,
+            #     status="ai_completed",
+            #     non_editable_data={},
+            #     manual_data={},
+            #     ai_manual_data={},
+            #     created_on=timezone.now(),
+            #     updated_on=timezone.now(),
+            #     job_id=job_id
+            # )
 
         # -------------------------------------------------------------------------
         # STEP 8 → CONVERT AI OUTPUT TO EXCEL
