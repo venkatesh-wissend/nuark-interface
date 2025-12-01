@@ -9,5 +9,5 @@ djangorestframework
 djangorestframework-simplejwt
 requests
 pandas
-
+openpyxl
 
