@@ -45,134 +45,6 @@ class UploadFileView(APIView):
 
         return Response({"message": "Upload success. Background processing started.", "upload_id": upload_id})
 
-
-# class ClassifyUploadDataView(APIView):
-#
-#     def post(self, request):
-#         upload_log_id = request.data.get("upload_log_id")
-#         taxonomy_name = request.data.get("taxonomy_name")
-#         rules = request.data.get("rules")
-#         job_id = request.data.get("job_id")
-#         max_workers = request.data.get("max_workers", 2)
-#
-#         if not upload_log_id:
-#             return Response({"error": "upload_log_id is required"}, status=400)
-#
-#         # Fetch uploaded data rows
-#         rows = UploadData.objects.filter(upload_log_id=upload_log_id)
-#         if not rows.exists():
-#             return Response({"error": "No upload data found for this log"}, status=404)
-#
-#         # --------------------------------------------------------------------------------
-#         # BUILD ALIAS MAP FROM MAP LOG TABLE
-#         # --------------------------------------------------------------------------------
-#
-#         map_columns = MapLogColumn.objects.all()
-#
-#         # alias → standard name mapping
-#         alias_map = {}
-#
-#         for col in map_columns:
-#             # Make sure alias_names is list
-#             if not col.alias_names:
-#                 continue
-#
-#             for alias in col.alias_names:
-#                 if alias:
-#                     alias_map[alias.strip().lower()] = col.column_name
-#
-#         # Debug: print built alias map
-#         print("\n=== Alias Map Loaded ===")
-#         for k, v in alias_map.items():
-#             print(k, "=>", v)
-#         print("========================\n")
-#
-#         # --------------------------------------------------------------------------------
-#         # BUILD PRODUCT PAYLOAD FOR EXTERNAL API
-#         # --------------------------------------------------------------------------------
-#
-#         products = []
-#
-#         for row in rows:
-#             mapped_row = {}
-#
-#             for key, value in row.data.items():
-#
-#                 normalized = key.strip().lower()
-#
-#                 standard = alias_map.get(normalized)
-#
-#                 # Debug unmapped keys to fix later in alias table
-#                 if not standard:
-#                     print("UNMAPPED COLUMN:", key)
-#                     continue
-#
-#                 mapped_row[standard] = value
-#
-#             # Ensure required default fields
-#             # mapped_row["taxonomy_name"] = mapped_row.get("taxonomy_name",
-#             #                                              "hybrid_ah_taxonomy_production")
-#             # mapped_row["rules"] = mapped_row.get("rules", "")
-#
-#             mapped_row["taxonomy_name"] = taxonomy_name
-#             mapped_row["rules"] =rules
-#
-#             products.append(mapped_row)
-#
-#         payload = {
-#             "products": products,
-#             "max_workers": max_workers
-#         }
-#
-#         print("\n=== Payload Sent to AI ===")
-#         print(json.dumps(payload, indent=4))
-#         print("==========================\n")
-#
-#         # --------------------------------------------------------------------------------
-#         # CALL EXTERNAL CLASSIFY API
-#         # --------------------------------------------------------------------------------
-#
-#         try:
-#             response = requests.post(
-#                 "https://nuark-13-prod-test-fjexdbfmgngufdex.centralus-01.azurewebsites.net/api/classify",
-#                 json=payload,
-#                 timeout=300
-#             )
-#             response.raise_for_status()
-#             ai_results = response.json()
-#
-#         except requests.RequestException as e:
-#             return Response({"error": f"External API call failed: {str(e)}"}, status=500)
-#
-#         # --------------------------------------------------------------------------------
-#         # SAVE AI RESULTS BACK TO DATABASE
-#         # --------------------------------------------------------------------------------
-#         rows = rows.order_by("id")
-#
-#         # Correct key from API response
-#         ai_output = ai_results.get("results", [])
-#
-#         for row, result in zip(rows, ai_output):
-#             row.ai_data = result
-#             row.save(update_fields=["ai_data"])
-#
-#             ClassificationTempData.objects.using("nuarkDB").create(
-#                 uuid=uuid.uuid4(),
-#                 ai_data=result,
-#                 status="ai_completed",
-#                 non_editable_data={},
-#                 manual_data={},
-#                 ai_manual_data={},
-#                 created_on=timezone.now(),
-#                 updated_on=timezone.now(),
-#                 job_id=job_id
-#             )
-#
-#         return Response({
-#             "message": "Classification complete",
-#             "ai_results": ai_results
-#         }, status=200)
-
 class ClassifyUploadDataView(APIView):
 
     def post(self, request):
@@ -314,14 +186,60 @@ class ClassifyUploadDataView(APIView):
         # -------------------------------------------------------------------------
         # STEP 10 → UPDATE JobRequest
         # -------------------------------------------------------------------------
-        JobRequest.objects.create(
+        job_request = JobRequest.objects.create(
             params=request.data,
             ai_data=ai_results,
             ai_filepath=signed_url,
         )
 
+        # -------------------------------------------------------------------------
+        # STEP 11 → SEND AI RESULTS TO STATISTICS API
+        # -------------------------------------------------------------------------
+        statistics_payload = {
+            "results": ai_output
+        }
+
+        try:
+            statistics_res = requests.post(
+                "https://nuark-13-prod-test-fjexdbfmgngufdex.centralus-01.azurewebsites.net/api/statistics",
+                json=statistics_payload,
+                timeout=180
+            )
+            statistics_res.raise_for_status()
+            statistics_data = statistics_res.json()
+        except Exception as e:
+            statistics_data = {"error": f"Statistics API failed: {str(e)}"}
+
+        # -------------------------------------------------------------------------
+        # STEP 12 → UPDATE JobRequest WITH STATISTICS RESULT
+        # -------------------------------------------------------------------------
+        job_request.statistics = statistics_data
+        job_request.save(update_fields=["statistics"])
+
         return Response({
             "message": "Auto-classification completed",
             "ai_results": ai_results,
-            "ai_filepath": signed_url
+            "ai_filepath": signed_url,
+            'statistics': statistics_data
         }, status=200)
+
+class GetJobDetailsView(APIView):
+
+    def get(self, request):
+        job_id = request.data.get("job_id")  # Get job_id from body
+
+        if not job_id:
+            return Response({"error": "job_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            job = JobRequest.objects.get(id=job_id)
+        except JobRequest.DoesNotExist:
+            return Response({"error": "Job not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({
+            "job_id": job.id,
+            # "params": job.params,
+            "ai_filepath": job.ai_filepath,
+            "statistics": job.statistics,
+            # "ai_data": job.ai_data,
+        }, status=status.HTTP_200_OK)
