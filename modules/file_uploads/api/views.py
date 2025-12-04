@@ -1,24 +1,34 @@
+import csv
 import uuid
 import tempfile
+import os
+import json
 import pandas as pd
+import requests
+from openpyxl import load_workbook
+from django.conf import settings
+from django.core.files.storage import FileSystemStorage
 from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from django.conf import settings
-from django.utils import timezone
-import os
-import json
+
+from modules.file_uploads.models import UploadData, UploadLog, MapLogColumn, JobRequest
 from .serializers import UploadFileSerializer
-from modules.file_uploads.models import UploadData, MapLogColumn, ClassificationTempData, JobRequest
 from modules.file_uploads.tasks.process_file import process_file_task
-from django.core.files.storage import FileSystemStorage
-import requests
-
-from rest_framework import status
-from modules.file_uploads.models import UploadData, UploadLog, MapLogColumn, ClassificationTempData
+from modules.file_uploads.tasks.classify_tasks import classify_upload_task  # Celery task
 
 
+# -----------------------------
+# HELPER FUNCTIONS
+# -----------------------------
+def is_empty_row(row_dict):
+    return all(v is None or str(v).strip() == "" for v in row_dict.values())
+
+
+# -----------------------------
+# UPLOAD FILE VIEW
+# -----------------------------
 class UploadFileView(APIView):
 
     def post(self, request):
@@ -28,7 +38,6 @@ class UploadFileView(APIView):
         file = serializer.validated_data["file"]
         module = serializer.validated_data.get("module")
         filename = file.name
-
         allowed = (".xlsx", ".csv")
 
         if not filename.lower().endswith(allowed):
@@ -43,191 +52,63 @@ class UploadFileView(APIView):
 
         upload_id = process_file_task(file_path, module)
 
-        return Response({"message": "Upload success. Background processing started.", "upload_id": upload_id})
+        return Response({
+            "message": "Upload success. Background processing started.",
+            "upload_id": upload_id
+        })
 
+
+# -----------------------------
+# CLASSIFY UPLOAD DATA VIEW
+# -----------------------------
 class ClassifyUploadDataView(APIView):
-
     def post(self, request):
-        upload_path = request.data.get("upload_path")
+        upload_filename = request.data.get("upload_path")  # filename only
         taxonomy_name = request.data.get("taxonomy_name")
         rules = request.data.get("rules", "")
-        job_id = request.data.get("job_id")
+        job_uuid = request.data.get("job_id")  # external job ID
+        account_uuid = request.data.get("account_uuid")  # NEW
 
-        if not upload_path:
-            return Response({"error": "upload_path is required"}, status=400)
-        if not job_id:
-            return Response({"error": "job_id is required"}, status=400)
+        if not upload_filename or not job_uuid:
+            return Response({"error": "upload_path and job_id are required"}, status=400)
 
-        # -------------------------------------------------------------------------
-        # STEP 1 → DOWNLOAD FILE FROM AZURE
-        # -------------------------------------------------------------------------
-        try:
-            file_response = requests.get(upload_path, timeout=60)
-            file_response.raise_for_status()
-            original_name = upload_path.split("?")[0].split("/")[-1]
-
-            suffix = original_name.split(".")[-1]
-            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{suffix}") as tmp:
-                tmp.write(file_response.content)
-                tmp_path = tmp.name
-
-        except Exception as e:
-            return Response({"error": f"Failed to download file: {str(e)}"}, status=500)
-
-        # -------------------------------------------------------------------------
-        # STEP 2 → PROCESS FILE USING EXISTING FUNCTION
-        # -------------------------------------------------------------------------
-        try:
-            upload_log_id = process_file_task(tmp_path, module="auto_classification")
-        except Exception as e:
-            return Response({"error": f"Failed to process file: {str(e)}"}, status=500)
-
-        # -------------------------------------------------------------------------
-        # STEP 3 → FETCH UPLOADED DATA
-        # -------------------------------------------------------------------------
-        rows = UploadData.objects.filter(upload_log_id=upload_log_id).order_by("row_id")
-        if not rows.exists():
-            return Response({"error": "No data found after processing the file"}, status=404)
-
-        # -------------------------------------------------------------------------
-        # STEP 4 → LOAD ALIAS MAP
-        # -------------------------------------------------------------------------
-        alias_map = {}
-        for col in MapLogColumn.objects.all():
-            for alias in col.alias_names:
-                if alias:
-                    alias_map[alias.strip().lower()] = col.column_name
-
-        # -------------------------------------------------------------------------
-        # STEP 5 → PREPARE AI PAYLOAD
-        # -------------------------------------------------------------------------
-        products = []
-        for row in rows:
-            mapped_row = {}
-            for key, value in row.data.items():
-                standard = alias_map.get(key.strip().lower())
-                if standard:
-                    mapped_row[standard] = value
-            mapped_row["taxonomy_name"] = taxonomy_name
-            mapped_row["rules"] = rules
-            products.append(mapped_row)
-
-        payload = {"products": products, "max_workers": 5}
-
-        # -------------------------------------------------------------------------
-        # STEP 6 → CALL AI API
-        # -------------------------------------------------------------------------
-        try:
-            res = requests.post(
-                "https://nuark-13-prod-test-fjexdbfmgngufdex.centralus-01.azurewebsites.net/api/classify",
-                json=payload,
-                timeout=300
-            )
-            res.raise_for_status()
-            ai_results = res.json()
-        except Exception as e:
-            return Response({"error": f"AI API failed: {str(e)}"}, status=500)
-
-        ai_output = ai_results.get("results", [])
-
-        # -------------------------------------------------------------------------
-        # STEP 7 → UPDATE UploadData & ClassificationTempData
-        # -------------------------------------------------------------------------
-        for row, ai in zip(rows, ai_output):
-            row.ai_data = ai
-            row.save(update_fields=["ai_data"])
-
-            # ClassificationTempData.objects.using("nuarkDB").create(
-            #     uuid=uuid.uuid4(),
-            #     ai_data=ai,
-            #     status="ai_completed",
-            #     non_editable_data={},
-            #     manual_data={},
-            #     ai_manual_data={},
-            #     created_on=timezone.now(),
-            #     updated_on=timezone.now(),
-            #     job_id=job_id
-            # )
-
-        # -------------------------------------------------------------------------
-        # STEP 8 → CONVERT AI OUTPUT TO EXCEL
-        # -------------------------------------------------------------------------
-        try:
-            df_ai = pd.DataFrame(ai_output)
-            tmp_excel_path = f"/tmp/ai_output_{job_id}.xlsx"
-            df_ai.to_excel(tmp_excel_path, index=False)
-        except Exception as e:
-            return Response({"error": f"Failed to create Excel: {str(e)}"}, status=500)
-
-        # -------------------------------------------------------------------------
-        # STEP 9 → UPLOAD EXCEL & GET PRESIGNED URL
-        # -------------------------------------------------------------------------
-        try:
-            upload_api_url = "http://40.81.229.208:8002/api/v1/upload"
-            presigned_url_api = "http://40.81.229.208:8002/api/v1/create_presigned_url"
-            headers = {"x-api-key": "xn4vZfSTTRsl7IwMwaIP2A"}
-
-            # Upload
-            with open(tmp_excel_path, "rb") as f:
-                files = {
-                    "file": (f"ai_output_{job_id}.xlsx", f, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                }
-                upload_resp = requests.post(upload_api_url, headers=headers, files=files)
-                upload_resp.raise_for_status()
-
-            # Get signed URL
-            params = {"path": f"ai_output_{job_id}.xlsx"}
-            presigned_resp = requests.get(presigned_url_api, headers=headers, params=params)
-            presigned_resp.raise_for_status()
-            signed_url = presigned_resp.json().get("url")
-        except Exception as e:
-            return Response({"error": f"Failed to upload AI Excel or get URL: {str(e)}"}, status=500)
-
-        # -------------------------------------------------------------------------
-        # STEP 10 → UPDATE JobRequest
-        # -------------------------------------------------------------------------
+        # -----------------------------
+        # STEP 0 → CREATE JobRequest
+        # -----------------------------
         job_request = JobRequest.objects.create(
             params=request.data,
-            ai_data=ai_results,
-            ai_filepath=signed_url,
+            upload_filename=upload_filename,
+            job_id=job_uuid,
+            account_id=account_uuid,  # save account ID
+            status="pending"
         )
 
-        # -------------------------------------------------------------------------
-        # STEP 11 → SEND AI RESULTS TO STATISTICS API
-        # -------------------------------------------------------------------------
-        statistics_payload = {
-            "results": ai_output
-        }
-
-        try:
-            statistics_res = requests.post(
-                "https://nuark-13-prod-test-fjexdbfmgngufdex.centralus-01.azurewebsites.net/api/statistics",
-                json=statistics_payload,
-                timeout=180
-            )
-            statistics_res.raise_for_status()
-            statistics_data = statistics_res.json()
-        except Exception as e:
-            statistics_data = {"error": f"Statistics API failed: {str(e)}"}
-
-        # -------------------------------------------------------------------------
-        # STEP 12 → UPDATE JobRequest WITH STATISTICS RESULT
-        # -------------------------------------------------------------------------
-        job_request.statistics = statistics_data
-        job_request.save(update_fields=["statistics"])
+        # -----------------------------
+        # STEP 1 → ENQUEUE CELERY TASK
+        # -----------------------------
+        classify_upload_task.delay(
+            job_request_id=job_request.id,
+            upload_filename=upload_filename,
+            taxonomy_name=taxonomy_name,
+            rules=rules,
+            job_uuid=job_uuid,
+            account_uuid=account_uuid
+        )
 
         return Response({
-            "message": "Auto-classification completed",
-            "ai_results": ai_results,
-            "ai_filepath": signed_url,
-            'statistics': statistics_data
-        }, status=200)
+            "message": "Job request received. AI classification will run in the background.",
+            "job_request_id": job_request.job_id,
+            "job_status": job_request.status
+        }, status=202)
 
+
+# -----------------------------
+# GET JOB DETAILS VIEW
+# -----------------------------
 class GetJobDetailsView(APIView):
 
     def get(self, request):
-        job_id = request.data.get("job_id")  # Get job_id from body
-
+        job_id = request.data.get("job_id")
         if not job_id:
             return Response({"error": "job_id is required"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -238,8 +119,85 @@ class GetJobDetailsView(APIView):
 
         return Response({
             "job_id": job.id,
-            # "params": job.params,
             "ai_filepath": job.ai_filepath,
             "statistics": job.statistics,
-            # "ai_data": job.ai_data,
         }, status=status.HTTP_200_OK)
+
+
+# -----------------------------
+# UPDATE AI JOB VIEW (NEW)
+# -----------------------------
+class UpdateAiJobView(APIView):
+    GRAPHQL_URL = "http://40.81.229.208:8000/api/v1/graphql/data/ai-response/"
+
+    def post(self, request):
+        import requests
+
+        job_uuid = request.data.get("uuid")
+        ai_file = request.data.get("aiFile")
+        stats = request.data.get("stats")
+
+        # Ensure stats is JSON string and then escape it for GraphQL
+        if isinstance(stats, dict):
+            stats = json.dumps(stats)            # {"a":1,"b":2}
+        stats_escaped = json.dumps(stats)[1:-1]  # escapes quotes properly
+
+        x_account = request.headers.get("X-Account")
+        api_key = request.headers.get("X-Api-Key")
+
+        # Construct raw GraphQL payload SAFELY
+        payload = f"""
+                mutation ClassificationJobAiUpdate {{
+                  classificationJobAiUpdate(
+                    uuid: "{job_uuid}",
+                    data: {{
+                      aiFile: "{ai_file}",
+                      stats: "{stats_escaped}"
+                    }}
+                  ) {{
+                    classificationJob {{
+                      createdOn
+                      createdBy
+                      uuid
+                      name
+                      aiFile
+                      inputFile
+                      statuses {{
+                        createdOn
+                        status
+                      }}
+                    }}
+                  }}
+                }}
+        """
+
+        print("========== GRAPHQL PAYLOAD SENT ==========")
+        print(payload)
+        print("==========================================")
+
+        headers = {
+            "Content-Type": "application/graphql",
+            "X-Api-Key": api_key,
+            "X-Account": x_account,
+        }
+
+        try:
+            response = requests.post(
+                self.GRAPHQL_URL,
+                data=payload,
+                headers=headers,
+                timeout=30
+            )
+
+            external_result = response.json()
+
+        except Exception as e:
+            return Response(
+                {"error": "Failed to update external AI job", "details": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        return Response({
+            "message": "AI job updated successfully",
+            "external_api_response": external_result
+        })

@@ -6,10 +6,14 @@ from modules.file_uploads.models.upload_log import UploadLog
 def is_empty_row(row_dict):
     return all(v is None or str(v).strip() == "" for v in row_dict.values())
 
-def process_file_task(file_path, module=None):
+def process_file_task(file_path, module=None, original_filename=None):
+    print(f"filename: {original_filename}")
     # 1. Create UploadLog
     filename = file_path.split("/")[-1]
-    log = UploadLog.objects.create(filename=filename, module=module)
+    log = UploadLog.objects.create(
+        filename=original_filename,
+        module=module
+    )
 
     # 2. Process file
     global_row = 1
