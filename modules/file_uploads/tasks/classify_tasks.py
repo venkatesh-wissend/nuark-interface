@@ -124,9 +124,25 @@ def classify_upload_task(self, job_request_id, upload_filename, taxonomy_name, r
             row.save(update_fields=["ai_data"])
 
         # -----------------------------
+        # FLATTEN AI RESULTS
+        # -----------------------------
+        flattened_results = []
+
+        for item in all_ai_results:
+            flat = item.copy()
+
+            # Extract nested classification fields
+            cls = flat.pop("classification", {})
+
+            flat["approach"] = cls.get("approach")
+            flat["end_node"] = cls.get("end_node")
+            flat["picked_taxonomy"] = cls.get("picked_taxonomy")
+
+            flattened_results.append(flat)
+        # -----------------------------
         # CREATE EXCEL
         # -----------------------------
-        df_ai = pd.DataFrame(all_ai_results)
+        df_ai = pd.DataFrame(flattened_results)
         tmp_excel_path = f"/tmp/ai_output_{job_request_id}.xlsx"
         df_ai.to_excel(tmp_excel_path, index=False)
 
