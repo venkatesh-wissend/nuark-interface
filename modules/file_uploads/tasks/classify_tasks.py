@@ -4,6 +4,7 @@ import requests
 from celery import shared_task
 from modules.file_uploads.models import UploadData, MapLogColumn, JobRequest
 from modules.file_uploads.tasks.process_file import process_file_task
+from modules.file_uploads.utils.external_job_updater import update_external_ai_job
 import math
 
 BATCH_SIZE = 100  # Number of products per AI API call
@@ -106,7 +107,7 @@ def classify_upload_task(self, job_request_id, upload_filename, taxonomy_name, r
                 res = requests.post(
                     "https://nuark-13-prod-test-fjexdbfmgngufdex.centralus-01.azurewebsites.net/api/classify",
                     json=payload,
-                    timeout=300
+                    timeout=30000
                 )
                 res.raise_for_status()
                 batch_results = res.json().get("results", [])
@@ -172,6 +173,21 @@ def classify_upload_task(self, job_request_id, upload_filename, taxonomy_name, r
         job_request.save(update_fields=["ai_data", "ai_filepath", "statistics", "status"])
 
         print(f"=========== TASK COMPLETED SUCCESSFULLY for JobRequest #{job_request_id} ===========")
+
+        try:
+            graphql_result = update_external_ai_job(
+                job_uuid=job_request.job_id,
+                ai_file=job_request.ai_filepath.split("/")[-1],
+                stats=job_request.statistics,
+                x_account=str(job_request.account_id),
+                api_key='VhMdRrZa.fjZ5LWOyk6HghPyvNnfQ1BlvtsLPtRpz'
+            )
+
+            print("GraphQL update successful:", graphql_result)
+
+        except Exception as e:
+            print("GraphQL update FAILED:", e)
+
 
     except Exception as exc:
         print(f"TASK FAILED – RETRYING: {exc}")

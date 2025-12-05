@@ -10,4 +10,5 @@ djangorestframework-simplejwt
 requests
 pandas
 openpyxl
+celery
 
