@@ -124,21 +124,25 @@ def classify_upload_task(self, job_request_id, upload_filename, taxonomy_name, r
             row.save(update_fields=["ai_data"])
 
         # -----------------------------
-        # FLATTEN AI RESULTS
+        # MERGE ORIGINAL INPUT + AI OUTPUT
         # -----------------------------
         flattened_results = []
 
-        for item in all_ai_results:
-            flat = item.copy()
+        for row, ai in zip(rows, all_ai_results):
+            merged = {}
 
-            # Extract nested classification fields
-            cls = flat.pop("classification", {})
+            # 1️⃣ Add original user-uploaded columns
+            for key, value in row.data.items():
+                merged[key] = value
 
-            flat["approach"] = cls.get("approach")
-            flat["end_node"] = cls.get("end_node")
-            flat["picked_taxonomy"] = cls.get("picked_taxonomy")
+            # 2️⃣ Add AI fields
+            classification = ai.get("classification", {})
 
-            flattened_results.append(flat)
+            merged["LLM_approach"] = classification.get("LLM_approach", "")
+            merged["LLM_end_node"] = classification.get("LLM_end_node", "")
+            merged["LLM_picked_taxonomy"] = classification.get("LLM_picked_taxonomy", "")
+
+            flattened_results.append(merged)
         # -----------------------------
         # CREATE EXCEL
         # -----------------------------
@@ -193,7 +197,7 @@ def classify_upload_task(self, job_request_id, upload_filename, taxonomy_name, r
         try:
             graphql_result = update_external_ai_job(
                 job_uuid=job_request.job_id,
-                ai_file=job_request.ai_filepath.split("/")[-1],
+                ai_file=job_request.ai_filepath,
                 stats=job_request.statistics,
                 x_account=str(job_request.account_id),
                 api_key='VhMdRrZa.fjZ5LWOyk6HghPyvNnfQ1BlvtsLPtRpz'

@@ -10,6 +10,7 @@ def update_external_ai_job(job_uuid, ai_file, stats, x_account, api_key):
     parsed_url = urlparse(ai_file)
     ai_file = unquote(parsed_url.path.split("/")[-1])
 
+
     if isinstance(stats, dict):
         stats = json.dumps(stats)
 
@@ -39,6 +40,10 @@ def update_external_ai_job(job_uuid, ai_file, stats, x_account, api_key):
             }}
         }}
     """
+
+    print("========== GRAPHQL PAYLOAD SENT ==========")
+    print(payload)
+    print("==========================================")
 
     headers = {
         "Content-Type": "application/graphql",
